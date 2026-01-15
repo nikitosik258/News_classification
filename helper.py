@@ -12,6 +12,8 @@ from sklearn.metrics import (
     mean_absolute_error, mean_squared_error, r2_score, explained_variance_score
 )
 from sklearn.model_selection import cross_validate
+from sklearn.preprocessing import label_binarize
+import re
 
 import plots as p
 from models import ClassificationMetrics, RocCurveData, ClassificationReportRow, BaseMetrics, RegressionMetrics, MultipleModelResults
@@ -28,7 +30,7 @@ def _calculate_classification_metrics(
 ) -> ClassificationMetrics:
     """Calculate classification performance metrics into a Pydantic model."""
     roc_auc_value: Optional[float] = (
-        float(roc_auc_score(y_test, y_probs)) if y_probs is not None else None
+        float(roc_auc_score(y_test, y_probs, average='macro', multi_class='ovr')) if y_probs is not None else None
     )
     metrics_model = ClassificationMetrics(
         roc_auc=roc_auc_value,
@@ -605,3 +607,10 @@ def winsorize_outliers(
     
     return df
 
+def tokenize_words(text: str):
+    if not isinstance(text, str):
+        return []
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)  # убираем пунктуацию
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.split()

@@ -10,6 +10,9 @@ from collections import Counter
 from sklearn.feature_selection import f_classif, mutual_info_classif
 from sklearn.preprocessing import LabelEncoder
 
+import re
+import html
+
 TIKTOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 try:
@@ -382,3 +385,13 @@ def filter_tokens_by_frequency(
             )
     
     return df_filtered
+
+
+def tokenize_words(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+    text = html.unescape(text)        # важно: убирает &#39; → '
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.split()
