@@ -1,397 +1,448 @@
-import tiktoken
-from typing import List, Sequence, Set, Any, Tuple
+# -*- coding: utf-8 -*-
+# nlp.py
+# Utilities for tokenization and multi-class token/ngram analysis (sparse, scalable).
 
-import string
-import nltk
-import pandas as pd
-import numpy as np
-from nltk.corpus import stopwords
-from collections import Counter
-from sklearn.feature_selection import f_classif, mutual_info_classif
-from sklearn.preprocessing import LabelEncoder
+from __future__ import annotations
 
 import re
+import string
+from collections import Counter, defaultdict
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, Any, Set
+from functools import lru_cache
 import html
 
-TIKTOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
+from sklearn.feature_selection import chi2, f_classif, mutual_info_classif
 
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
 
-def tokenize_tiktoken(text: str) -> List[str]:
-    """Tokenize text with tiktoken and return decoded byte tokens."""
-    token_bytes = [
-        TIKTOKEN_ENCODING.decode_single_token_bytes(token)
-        for token in TIKTOKEN_ENCODING.encode(text)
-    ]
-    tokens = [token.decode('utf-8', errors='replace').strip().lower() for token in token_bytes]
-    return [token for token in tokens if token]  # Remove empty tokens
+# ============================================================
+# Tokenization
+# ============================================================
 
-def get_stopwords_set(custom_stopwords: Set[str] = None) -> Set[str]:
-    """Return English stopwords set combined with custom ones."""
-    default_stopwords = set(stopwords.words('english'))
-    if custom_stopwords:
-        return default_stopwords.union(custom_stopwords)
-    return default_stopwords
+_WORD_RE = re.compile(r"[^a-z0-9\s]+")
 
-# -------------------------------
-# Internal helpers (DRY)
-# -------------------------------
 
-def _get_punctuation_set(custom_punctuation: Set[str] = None) -> Set[str]:
-    """Return punctuation set combined with custom ones."""
-    default_punctuation = set(string.punctuation)
-    if custom_punctuation:
-        return default_punctuation.union(custom_punctuation)
-    return default_punctuation
+def tokenize_words(text: str) -> List[str]:
+    """
+    Простая word-level токенизация под RNN/CNN/LSTM/GloVe.
+    - lower
+    - схлопывает пробелы
+    """
+    if not isinstance(text, str):
+        return []
+    t = text.lower()
+    t = _WORD_RE.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t.split() if t else []
 
-def _is_punctuation_token(token: str, custom_punctuation: Set[str] = None) -> bool:
-    """Return True if token is punctuation or all chars are punctuation."""
-    punctuation_set = _get_punctuation_set(custom_punctuation)
-    stripped = token.strip()
-    return stripped in punctuation_set or (stripped != '' and all(c in punctuation_set for c in stripped))
+
+def detokenize(tokens: Sequence[str]) -> str:
+    return " ".join(tokens)
+
+
+# ============================================================
+# Stopwords / punctuation
+# ============================================================
+
+def get_stopwords_set(extra: Optional[Iterable[str]] = None) -> set:
+    s = set(ENGLISH_STOP_WORDS)
+    if extra is not None:
+        s |= {str(x).lower() for x in extra}
+    return s
+
+
+def get_punctuation_set(extra: Optional[Iterable[str]] = None) -> set:
+    s = set(string.punctuation)
+    if extra is not None:
+        s |= set(extra)
+    return s
 
 
 def filter_tokens(
     tokens: Sequence[str],
     *,
-    remove_stopwords: bool = False,
-    remove_punct_tokens: bool = False,
-    custom_stopwords: Set[str] = None,
-    custom_punctuation: Set[str] = None,
-    lowercase_for_counting: bool = False,
+    to_lower: bool = True,
+    remove_stopwords: bool = True,
+    remove_punctuation: bool = True,
+    stopwords: Optional[set] = None,
+    punctuation: Optional[set] = None,
 ) -> List[str]:
-    """Apply common token filters in one pass. Optionally converts to lowercase for counting purposes."""
-    stop_words = get_stopwords_set(custom_stopwords) if remove_stopwords else None
-    result: List[str] = []
+    if stopwords is None:
+        stopwords = get_stopwords_set()
+    if punctuation is None:
+        punctuation = get_punctuation_set()
 
-    # print(tokens)
+    out: List[str] = []
     for tok in tokens:
-        t = str(tok).strip()  # Only strip whitespace, don't modify the token content
-        if not t:
+        t = str(tok)
+        if to_lower:
+            t = t.lower()
+
+        if remove_punctuation and (t in punctuation):
             continue
-        if remove_punct_tokens and _is_punctuation_token(t, custom_punctuation):
+        if remove_stopwords and (t in stopwords):
             continue
-        if stop_words is not None and t.lower() in stop_words:
+        if t.strip() == "":
             continue
-            
-        # Apply lowercase conversion if requested for counting purposes
-        final_token = t.lower() if lowercase_for_counting else t
-        result.append(final_token)
-    return result
 
-def _flatten_array_column(df: pd.DataFrame, column_name: str) -> List[Any]:
-    """Flatten list-like column into a Python list."""
-    return [item for sublist in df[column_name] for item in sublist]
-
-def _value_counts(values: Sequence[Any]) -> pd.Series:
-    """Return pandas value_counts for a sequence."""
-    return pd.Series(list(values)).value_counts()
-
-def _generate_ngrams(tokens: List[str], n: int) -> List[Tuple[str, ...]]:
-    """Generate n-grams from a list of tokens."""
-    if n < 1:
-        raise ValueError("n must be >= 1")
-    if len(tokens) < n:
-        return []
-    return [tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)]
-
-def generate_all_ngrams(tokens: List[str], max_n: int) -> List[Tuple[str, ...]]:
-    """Generate all n-grams from 1 to max_n for a given list of tokens."""
-    if max_n < 1:
-        raise ValueError("max_n must be >= 1")
-    
-    all_ngrams = []
-    for i in range(1, max_n + 1):
-        all_ngrams.extend(_generate_ngrams(tokens, i))
-    return all_ngrams
+        out.append(t)
+    return out
 
 
-def stopwords_count(df: pd.DataFrame, column_name: str, custom_stopwords: Set[str] = None) -> pd.Series:
-    """Count stopwords in a list-like column."""
-    all_items = _flatten_array_column(df, column_name)
-    stop_words = get_stopwords_set(custom_stopwords)
-    filtered = [t for t in all_items if str(t).strip().lower() in stop_words]
-    return _value_counts(filtered)
-
-def punctuation_counts(df: pd.DataFrame, column_name: str, custom_punctuation: Set[str] = None) -> pd.Series:
-    """Count punctuation tokens in a list-like column."""
-    all_items = _flatten_array_column(df, column_name)
-    punct = [t for t in all_items if _is_punctuation_token(str(t), custom_punctuation)]
-    return _value_counts(punct)
+# ============================================================
+# Counts
+# ============================================================
 
 def token_counts(
-    df: pd.DataFrame,
-    column_name: str,
-    remove_stopwords: bool = False,
-    remove_punctuation: bool = False,
-    custom_stopwords: Set[str] = None,
-    custom_punctuation: Set[str] = None,
-    lowercase_for_counting: bool = False
-) -> pd.Series:
-    """Count tokens with optional stopword/punctuation filtering and lowercase for counting."""
-    all_items = _flatten_array_column(df, column_name)
-    processed = filter_tokens(
-        [str(item) for item in all_items],
-        remove_stopwords=remove_stopwords,
-        remove_punct_tokens=remove_punctuation,
-        custom_stopwords=custom_stopwords,
-        custom_punctuation=custom_punctuation,
-        lowercase_for_counting=lowercase_for_counting,
-    )
-    return _value_counts(processed)
-
-def compute_ngram_metrics(
-    texts_tokenized: List[List[str]],
-    labels: List[int],
-    n: int = 1,
-    metric: str = 'anova_f',
-    min_count: int = 1,
-) -> dict[str, float]:
-    """Compute n-gram metrics for a multi-class classification corpus.
-    
-    Args:
-        texts_tokenized: List of tokenized texts
-        labels: Class labels (any integers)
-        n: Maximum n-gram size to analyze (includes all 1-grams up to n-grams, default: 1)
-        metric: Feature selection metric to compute ('anova_f' or 'mutual_info', default: 'anova_f')
-        min_count: Minimum number of times a token/n-gram must appear to be included (default: 1)
-    
-    Returns:
-        Dictionary mapping n-gram strings to their metric values, sorted by metric value descending
-    """
-    
-    # Validate input
-    if len(texts_tokenized) != len(labels):
-        raise ValueError("Length of texts_tokenized and labels must be equal")
-    
-    if n < 1:
-        raise ValueError("n must be >= 1")
-    
-    if metric not in ['anova_f', 'mutual_info']:
-        raise ValueError("metric must be 'anova_f' or 'mutual_info'")
-    
-    # Get unique classes
-    unique_classes = sorted(set(labels))
-    
-    # Generate all n-grams from 1 to n and separate by class
-    ngrams_by_class = {cls: [] for cls in unique_classes}
-    
-    for tokens, label in zip(texts_tokenized, labels):
-        # Generate all n-grams from 1 to n
-        all_ngrams = generate_all_ngrams(tokens, n)
-        
-        ngrams_by_class[label].extend(all_ngrams)
-    
-    # Calculate frequencies for each class
-    freq_by_class = {cls: Counter(ngrams_by_class[cls]) for cls in unique_classes}
-    
-    # Get all unique n-grams across all classes
-    all_ngrams = set()
-    for freq_dict in freq_by_class.values():
-        all_ngrams.update(freq_dict.keys())
-    
-    # Filter n-grams by minimum count threshold
-    if min_count > 1:
-        # Calculate total count for each n-gram across all classes
-        total_counts = Counter()
-        for freq_dict in freq_by_class.values():
-            total_counts.update(freq_dict)
-        
-        # Keep only n-grams that meet the minimum count threshold
-        filtered_ngrams = {ngram for ngram in all_ngrams if total_counts[ngram] >= min_count}
-        
-        # Update all_ngrams and filter freq_by_class dictionaries
-        all_ngrams = filtered_ngrams
-        for cls in unique_classes:
-            freq_by_class[cls] = {ngram: count for ngram, count in freq_by_class[cls].items() 
-                                 if ngram in filtered_ngrams}
-    
-    # Prepare feature matrix for ANOVA F-value or Mutual Information computation
-    # Create a document-term matrix where rows are documents and columns are n-grams
-    vocab = list(all_ngrams)
-    vocab_to_idx = {ngram: i for i, ngram in enumerate(vocab)}
-    
-    # Create feature matrix (documents x n-grams)
-    X = np.zeros((len(texts_tokenized), len(vocab)))
-    
-    for doc_idx, tokens in enumerate(texts_tokenized):
-        # Generate all n-grams for this document
-        doc_ngrams = generate_all_ngrams(tokens, n)
-        
-        # Count n-grams in this document
-        doc_ngram_counts = Counter(doc_ngrams)
-        
-        # Fill the feature matrix
-        for ngram, count in doc_ngram_counts.items():
-            if ngram in vocab_to_idx:
-                X[doc_idx, vocab_to_idx[ngram]] = count
-    
-    # Encode labels for sklearn
-    label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(labels)
-    
-    # Compute feature selection metric
-    if metric == 'anova_f':
-        # ANOVA F-value
-        f_scores, p_values = f_classif(X, y_encoded)
-        metric_values = f_scores
-    else:  # mutual_info
-        # Mutual Information
-        mi_scores = mutual_info_classif(X, y_encoded, random_state=42)
-        metric_values = mi_scores
-    
-    # Create dictionary mapping n-gram strings to metric values
-    ngram_to_string = {ngram: ' '.join(ngram) for ngram in all_ngrams}
-    metric_dict = {}
-    for i, ngram in enumerate(vocab):
-        token_str = ngram_to_string[ngram]
-        metric_dict[token_str] = metric_values[i]
-    
-    # Sort by metric value (descending order - higher scores first)
-    return dict(sorted(metric_dict.items(), key=lambda x: x[1], reverse=True))
-
-
-def count_based_analysis(
-    texts_tokenized: List[List[str]],
-    labels: List[int],
-    n: int = 1,
-    metric: str = 'anova_f',
-    min_count: int = 1,
-) -> pd.DataFrame:
-    """Compute n-gram stats for a multi-class classification corpus.
-    
-    Args:
-        texts_tokenized: List of tokenized texts
-        labels: Class labels (any integers)
-        n: Maximum n-gram size to analyze (includes all 1-grams up to n-grams, default: 1)
-        metric: Feature selection metric to compute ('anova_f' or 'mutual_info', default: 'anova_f')
-        min_count: Minimum number of times a token/n-gram must appear to be included (default: 1)
-    """
-    
-    # Get metric values using the extracted method
-    metric_dict = compute_ngram_metrics(texts_tokenized, labels, n, metric, min_count)
-    
-    # Get unique classes for building count/frequency columns
-    unique_classes = sorted(set(labels))
-    
-    # Generate all n-grams from 1 to n and separate by class (needed for detailed stats)
-    ngrams_by_class = {cls: [] for cls in unique_classes}
-    
-    for tokens, label in zip(texts_tokenized, labels):
-        # Generate all n-grams from 1 to n
-        all_ngrams = generate_all_ngrams(tokens, n)
-        
-        ngrams_by_class[label].extend(all_ngrams)
-    
-    # Calculate frequencies for each class
-    freq_by_class = {cls: Counter(ngrams_by_class[cls]) for cls in unique_classes}
-    
-    # Filter by minimum count (consistent with _compute_ngram_metrics)
-    if min_count > 1:
-        total_counts = Counter()
-        for freq_dict in freq_by_class.values():
-            total_counts.update(freq_dict)
-        
-        filtered_ngrams = {ngram for ngram in total_counts if total_counts[ngram] >= min_count}
-        
-        for cls in unique_classes:
-            freq_by_class[cls] = {ngram: count for ngram, count in freq_by_class[cls].items() 
-                                 if ngram in filtered_ngrams}
-    
-    # Create DataFrame from metric dictionary
-    df = pd.DataFrame([
-        {'token': token, 'metric': metric_value} 
-        for token, metric_value in metric_dict.items()
-    ])
-    
-    # Add count and frequency columns for each class
-    for cls in unique_classes:
-        # Count columns
-        count_col = f'count_{cls}'
-        freq_col = f'freq_{cls}'
-        
-        # Create frequency mapping with string keys
-        ngram_to_string = {}
-        for ngram in freq_by_class[cls].keys():
-            ngram_to_string[' '.join(ngram)] = freq_by_class[cls][ngram]
-        
-        # Merge counts
-        df = df.merge(
-            pd.Series(ngram_to_string, name=count_col).reset_index().rename(columns={'index': 'token'}),
-            on='token', how='left'
-        ).fillna(0)
-        
-        # Convert counts to integers
-        df[count_col] = df[count_col].astype(int)
-        
-        # Calculate frequencies
-        total_ngrams = len(ngrams_by_class[cls])
-        df[freq_col] = df[count_col] / total_ngrams if total_ngrams > 0 else 0
-    
-    # Calculate total count across all classes
-    count_cols = [f'count_{cls}' for cls in unique_classes]
-    df['total_count'] = df[count_cols].sum(axis=1)
-    
-    return df.reset_index(drop=True)
-
-def filter_tokens_column(df: pd.DataFrame, column_name: str, tokens: List[str]) -> pd.DataFrame:
-    """Filter tokens in a column."""
-    return df[column_name].transform(
-        lambda arr: [item for item in arr if item in tokens]
-    )
+    tokenized_texts: Sequence[Sequence[str]],
+    *,
+    min_len: int = 1,
+) -> Counter:
+    c = Counter()
+    for toks in tokenized_texts:
+        for t in toks:
+            if len(t) >= min_len:
+                c[t] += 1
+    return c
 
 
 def filter_tokens_by_frequency(
-    df: pd.DataFrame, 
-    text_columns: List[str], 
-    min_frequency: int = 50
-) -> pd.DataFrame:
-    """Filter tokens that appear less than min_frequency times across all text columns.
-    
-    Args:
-        df: DataFrame with tokenized text columns (lists of tokens)
-        text_columns: List of column names containing tokenized text
-        min_frequency: Minimum frequency threshold for keeping tokens
-        
-    Returns:
-        DataFrame with filtered tokens in the specified columns
+    tokenized_texts: Sequence[Sequence[str]],
+    *,
+    min_freq: int = 2,
+    max_freq: Optional[int] = None,
+) -> List[List[str]]:
     """
-    from sklearn.feature_extraction.text import CountVectorizer
-    from collections import Counter
-    
-    # Flatten all tokens from all specified columns
-    all_tokens = []
-    for col in text_columns:
-        if col in df.columns:
-            # Flatten the list of lists into a single list
-            column_tokens = [token for token_list in df[col] for token in token_list]
-            all_tokens.extend(column_tokens)
-    
-    # Count token frequencies
-    token_counts = Counter(all_tokens)
-    
-    # Get tokens that meet the minimum frequency threshold
-    frequent_tokens = {token for token, count in token_counts.items() if count >= min_frequency}
-    
-    # Filter tokens in each column
-    df_filtered = df.copy()
-    for col in text_columns:
-        if col in df_filtered.columns:
-            df_filtered[col] = df_filtered[col].apply(
-                lambda token_list: [token for token in token_list if token in frequent_tokens]
-            )
-    
-    return df_filtered
+    Удаляет токены, встречающиеся слишком редко/слишком часто (если max_freq задан).
+    """
+    c = token_counts(tokenized_texts)
+    out: List[List[str]] = []
+    for toks in tokenized_texts:
+        nt = []
+        for t in toks:
+            f = c.get(t, 0)
+            if f < min_freq:
+                continue
+            if max_freq is not None and f > max_freq:
+                continue
+            nt.append(t)
+        out.append(nt)
+    return out
 
 
-def tokenize_words(text: str) -> list[str]:
-    if not isinstance(text, str):
+# ============================================================
+# N-grams
+# ============================================================
+
+def generate_ngrams(tokens: Sequence[str], n: int) -> List[str]:
+    if n <= 0:
         return []
-    text = html.unescape(text)        # важно: убирает &#39; → '
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text.split()
+    if len(tokens) < n:
+        return []
+    return [" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def texts_to_ngrams(
+    tokenized_texts: Sequence[Sequence[str]],
+    n: int,
+) -> List[List[str]]:
+    return [generate_ngrams(toks, n) for toks in tokenized_texts]
+
+
+# ============================================================
+# Sparse multi-class n-gram scoring
+# ============================================================
+
+def compute_ngram_scores(
+    texts: Sequence[Union[str, Sequence[str]]],
+    y: Sequence[int],
+    *,
+    n: int = 1,
+    metric: str = "chi2",  # 'chi2' | 'anova_f' | 'mutual_info'
+    min_df: Union[int, float] = 5,
+    max_df: Union[int, float] = 1.0,
+    max_features: Optional[int] = 200_000,
+    tokenizer: Optional[callable] = None,
+    lowercase: bool = True,
+) -> pd.DataFrame:
+    """
+    Возвращает DataFrame: token, score
+    Счёт делается на sparse матрице (OK для 120k строк).
+
+    texts:
+      - list[str] (сырые тексты)  ИЛИ
+      - list[list[str]] (уже токенизировано)
+
+    Если list[list[str]], то мы объединяем токены пробелом и применяем CountVectorizer
+    с analyzer='word'.
+    """
+    if len(texts) != len(y):
+        raise ValueError("texts and y must have same length")
+
+    # привести к list[str]
+    if len(texts) == 0:
+        return pd.DataFrame({"token": [], "score": []})
+
+    if isinstance(texts[0], (list, tuple)):
+        docs = [" ".join(map(str, t)) for t in texts]  # type: ignore[arg-type]
+        tok = None
+    else:
+        docs = [str(t) for t in texts]  # type: ignore[assignment]
+        tok = tokenizer
+
+    vec = CountVectorizer(
+        lowercase=lowercase,
+        tokenizer=tok,
+        ngram_range=(n, n),
+        min_df=min_df,
+        max_df=max_df,
+        max_features=max_features,
+    )
+
+    X = vec.fit_transform(docs)  # sparse
+    y_arr = np.asarray(y, dtype=int)
+
+    metric = metric.lower().strip()
+    if metric == "chi2":
+        scores, _ = chi2(X, y_arr)
+    elif metric in ("anova_f", "f", "f_classif"):
+        scores, _ = f_classif(X, y_arr)
+    elif metric in ("mutual_info", "mi"):
+        # MI в sklearn работает с dense/sparse, но может быть медленнее; оставляем как опцию
+        scores = mutual_info_classif(X, y_arr, discrete_features=True, random_state=42)
+    else:
+        raise ValueError("metric must be one of: 'chi2', 'anova_f', 'mutual_info'")
+
+    feats = np.asarray(vec.get_feature_names_out())
+    df = pd.DataFrame({"token": feats, "score": scores})
+    df = df.sort_values("score", ascending=False).reset_index(drop=True)
+    return df
+
+
+def count_based_analysis(
+    tokenized_texts: Sequence[Sequence[str]],
+    y: Sequence[int],
+    *,
+    top_k: int = 300,
+    metric: str = "chi2",
+    n: int = 1,
+    min_df: Union[int, float] = 5,
+    max_df: Union[int, float] = 1.0,
+    max_features: Optional[int] = 200_000,
+) -> pd.DataFrame:
+    """
+    Возвращает DataFrame формата, который ожидает твой plot_count_based_analysis:
+      token, score, total_count,
+      count_<class>, freq_<class> для каждого класса.
+
+    Важно: всё строится на sparse CountVectorizer, без dense матриц.
+    """
+    if len(tokenized_texts) != len(y):
+        raise ValueError("tokenized_texts and y must have same length")
+
+    if len(tokenized_texts) == 0:
+        return pd.DataFrame()
+
+    # превращаем токены обратно в документы
+    docs = [" ".join(map(str, toks)) for toks in tokenized_texts]
+    y_arr = np.asarray(y, dtype=int)
+    classes = sorted(np.unique(y_arr).tolist())
+
+    # sparse ngram matrix
+    vec = CountVectorizer(
+        lowercase=True,
+        ngram_range=(n, n),
+        min_df=min_df,
+        max_df=max_df,
+        max_features=max_features,
+    )
+    X = vec.fit_transform(docs)  # (N, V), sparse
+    feats = np.asarray(vec.get_feature_names_out())
+
+    # score
+    metric_l = metric.lower().strip()
+    if metric_l == "chi2":
+        scores, _ = chi2(X, y_arr)
+    elif metric_l in ("anova_f", "f", "f_classif"):
+        scores, _ = f_classif(X, y_arr)
+    elif metric_l in ("mutual_info", "mi"):
+        scores = mutual_info_classif(X, y_arr, discrete_features=True, random_state=42)
+    else:
+        raise ValueError("metric must be one of: 'chi2', 'anova_f', 'mutual_info'")
+
+    # total counts per feature
+    total_count = np.asarray(X.sum(axis=0)).ravel().astype(int)
+
+    # per-class counts
+    class_counts: Dict[int, np.ndarray] = {}
+    for c in classes:
+        Xc = X[y_arr == c]
+        class_counts[c] = np.asarray(Xc.sum(axis=0)).ravel().astype(int)
+
+    # build df
+    df = pd.DataFrame({"token": feats, "score": scores, "total_count": total_count})
+    for c in classes:
+        df[f"count_{c}"] = class_counts[c]
+        denom = max(1, int((y_arr == c).sum()))
+        # "freq" как среднее количество n-грамм на документ класса
+        df[f"freq_{c}"] = df[f"count_{c}"] / denom
+
+    df = df.sort_values("score", ascending=False).head(top_k).reset_index(drop=True)
+    return df
+
+@lru_cache(maxsize=1)
+def get_default_resources():
+    """
+    Кэшируем, чтобы стоп-слова/пунктуация создавались один раз за процесс.
+    """
+    stopwords = get_stopwords_set()
+    punctuation = get_punctuation_set()
+    return stopwords, punctuation
+
+def ensure_tokens(x):
+    """
+    Приводит значение к list[str] токенов.
+    - list -> как есть
+    - str  -> tokenize_words(str)
+    - другое/NaN -> []
+    """
+    if isinstance(x, list):
+        return x
+    if isinstance(x, str):
+        return tokenize_words(x)
+    return []
+
+
+# --------------- настройки мусора ---------------
+BAD_EXACT = {
+    "#name?", "#name", "nan", "none", "null", "n/a", "na", "undefined", "error"
+}
+BAD_CONTAINS = {
+    "#name?",  # иногда встречается в составе
+}
+
+ARTIFACT_TOKENS = {"lt", "gt", "amp", "quot", "nbsp", "apos"}  # мусор после html
+
+TAG_RE = re.compile(r"<[^>]+>")
+WS_RE = re.compile(r"\s+")
+CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
+
+# "битые" html сущности: "#39;" вместо "&#39;"
+BROKEN_ENTITY_RE = re.compile(r"#(\d{1,4});")
+
+ARTIFACT_TOKENS_RE = re.compile(r"\b(?:lt|gt|amp|quot|nbsp|apos)\b", flags=re.IGNORECASE)
+
+
+def is_garbage_text(x: object) -> bool:
+    if x is None:
+        return True
+    s = str(x).strip()
+    if not s:
+        return True
+
+    low = s.lower()
+    if low in BAD_EXACT:
+        return True
+
+    if any(b in low for b in BAD_CONTAINS):
+        return True
+
+    # частый маркер мусорной категории
+    if low == "unknown":
+        return True
+
+    return False
+
+
+def clean_text_html_artifacts(x: object) -> str:
+    """Очистка HTML-артефактов + нормализация пробелов."""
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if not s:
+        return ""
+
+    # лечим "битые" сущности вида "#39;" -> "'"
+    def _fix_broken_entity(m):
+        code = int(m.group(1))
+        if 0 <= code <= 0x10FFFF:
+            try:
+                return chr(code)
+            except Exception:
+                return " "
+        return " "
+
+    s = BROKEN_ENTITY_RE.sub(_fix_broken_entity, s)
+
+    # стандартное декодирование html сущностей: &amp; &#39; &lt; ...
+    s = html.unescape(s)
+
+    # убрать html-теги
+    s = TAG_RE.sub(" ", s)
+
+    # убрать control chars
+    s = CTRL_RE.sub(" ", s)
+
+    # убрать отдельные мусорные токены lt/gt/amp/...
+    s = ARTIFACT_TOKENS_RE.sub(" ", s)
+
+    # нормализовать пробелы
+    s = WS_RE.sub(" ", s).strip()
+    return s
+
+
+def clean_and_dedup_df(
+    df: pd.DataFrame,
+    text_col: str = "Description",
+    label_col: str = "Class Index",
+    also_clean_cols: tuple = ("Title",),
+    drop_unknown_label: bool = True,
+) -> pd.DataFrame:
+    df2 = df.copy()
+
+    # 1) убрать явный мусор по тексту
+    df2[text_col] = df2[text_col].astype("string")
+    df2 = df2.loc[~df2[text_col].apply(is_garbage_text)].copy()
+
+    # 2) очистить HTML-артефакты
+    df2[text_col] = df2[text_col].apply(clean_text_html_artifacts)
+
+    for c in also_clean_cols:
+        if c in df2.columns:
+            df2[c] = df2[c].astype("string").apply(clean_text_html_artifacts)
+
+    # 3) после очистки снова убрать пустые
+    df2 = df2.loc[df2[text_col].str.len() > 0].copy()
+
+    # 4) (опционально) убрать мусорный класс Unknown, если он у тебя есть в label_col
+    if drop_unknown_label and label_col in df2.columns:
+        df2 = df2.loc[df2[label_col].astype(str).str.lower() != "unknown"].copy()
+
+    # 5) дедуп по Description с обработкой конфликтов классов
+    if label_col in df2.columns:
+        nunique_per_text = df2.groupby(text_col)[label_col].nunique(dropna=False)
+        conflict_texts = nunique_per_text[nunique_per_text > 1].index
+
+        n_conflicts = len(conflict_texts)
+        if n_conflicts > 0:
+            # удаляем все конфликтные описания
+            df2 = df2.loc[~df2[text_col].isin(conflict_texts)].copy()
+
+        # теперь оставляем по одному экземпляру каждого Description
+        before = len(df2)
+        df2 = df2.drop_duplicates(subset=[text_col], keep="first").copy()
+        after = len(df2)
+
+        print(f"[DEDUP] conflicts removed: {n_conflicts}")
+        print(f"[DEDUP] duplicates removed: {before - after}")
+
+    else:
+        # если лейбла нет, просто drop_duplicates
+        before = len(df2)
+        df2 = df2.drop_duplicates(subset=[text_col], keep="first").copy()
+        print(f"[DEDUP] duplicates removed: {before - len(df2)}")
+
+    df2 = df2.reset_index(drop=True)
+    return df2
