@@ -12,12 +12,12 @@
 
 ## Решение
 
-### 1. EDA (главные выводы)
+### 1. EDA (eda.ipynd)
 - Обнаружены дубликаты текстов (одни и те же Description с разным Title)
 - Обнаружены мусорные записи (например, #NAME?, HTML-артефакты вида #39; одиночные символы s, t и т.д.)
 - Все классы сбалансированные
 
-### 2. Baseline модели
+### 2. Baseline модели (baseline.ipynd)
 - **CountVectorizer + классические ML алгоритмы:**
   - LogisticRegression
   - DecisionTreeClassifier  
@@ -34,7 +34,7 @@
   <img width="1135" height="580" alt="image" src="https://github.com/user-attachments/assets/d0224b86-bdd3-48a1-9308-e23f6849af73" />
 
 
-### 3. Нейронные сети
+### 3. Нейронные сети (neural_networks.ipynd)
 - **При решениии использовался PyTorch**
 - **RNN** - рекуррентная сеть для анализа последовательностей
 - **CNN** - сверточная сеть для выявления локальных паттернов
